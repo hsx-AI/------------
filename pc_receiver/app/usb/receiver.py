@@ -110,9 +110,12 @@ class UsbReceiverService:
                         payload = ack.model_dump(mode="json")
                         transport.write(encode_frame(payload))
                         self.last_message_at = datetime.now(timezone.utc)
-                    except (ValueError, ValidationError, ProtocolError, json.JSONDecodeError) as exc:
+                    except ValidationError:
                         # ValidationError text can echo input fields, including the code.
-                        LOGGER.warning("Rejected USB message (%s)", type(exc).__name__)
+                        LOGGER.warning("Rejected USB message (ValidationError)")
+                    except (ValueError, ProtocolError, json.JSONDecodeError) as exc:
+                        # These messages are fixed reason strings and do not include the SMS code.
+                        LOGGER.warning("Rejected USB message (%s): %s", type(exc).__name__, exc)
             except (usb.core.USBError, OSError, RuntimeError, ProtocolError) as exc:
                 LOGGER.warning("USB session ended: %s", exc)
             except Exception:
