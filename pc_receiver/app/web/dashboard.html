@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SMS USB Receiver</title>
+  <style>
+    :root{color-scheme:dark;--bg:#08111f;--panel:#101d30;--panel2:#14243a;--line:#263a55;--text:#edf5ff;--muted:#90a6c1;--blue:#54a8ff;--green:#4adea3;--red:#ff7587;--amber:#ffc461;--shadow:0 18px 45px #02081788}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0,#15345c 0,transparent 35%),var(--bg);font:15px/1.5 Inter,"Segoe UI",sans-serif;color:var(--text);min-height:100vh}
+    .shell{width:min(1080px,calc(100% - 32px));margin:auto;padding:34px 0 52px}.top{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:24px}.brand{display:flex;gap:14px;align-items:center}.logo{width:48px;height:48px;border-radius:15px;background:linear-gradient(145deg,#66b5ff,#326ce8);display:grid;place-items:center;box-shadow:0 10px 26px #2878ef55;font-size:23px}.brand h1{font-size:21px;margin:0}.brand p{margin:2px 0 0;color:var(--muted);font-size:13px}.pill{display:flex;align-items:center;gap:8px;padding:8px 13px;border:1px solid var(--line);background:#0b1728cc;border-radius:999px;color:var(--muted)}.dot{width:9px;height:9px;border-radius:50%;background:var(--amber);box-shadow:0 0 12px currentColor}.pill.ok .dot{background:var(--green)}.pill.bad .dot{background:var(--red)}
+    .grid{display:grid;grid-template-columns:1.35fr .8fr;gap:18px}.card{background:linear-gradient(150deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.card h2{font-size:15px;margin:0 0 18px;color:#d8e9ff}.code-card{min-height:285px;display:flex;flex-direction:column}.code{font:700 clamp(38px,8vw,72px)/1.1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.12em;margin:17px 0 7px;word-break:break-all}.hint,.meta,.label{color:var(--muted);font-size:13px}.meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:auto;padding-top:22px}.meta div{background:#0b1728aa;border-radius:12px;padding:10px 12px}.meta strong{display:block;color:var(--text);font-weight:500;margin-top:2px;overflow-wrap:anywhere}
+    .actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:18px}button{border:0;border-radius:11px;padding:10px 14px;font-weight:650;cursor:pointer;color:#06101d;background:var(--blue);transition:.15s transform,.15s opacity}button:hover{transform:translateY(-1px)}button:disabled{opacity:.45;cursor:not-allowed;transform:none}.secondary{color:var(--text);background:#233751}.danger{color:#ffdce1;background:#632b3a}.field{margin:12px 0}.field label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}input{width:100%;border:1px solid var(--line);border-radius:11px;background:#091523;color:var(--text);padding:11px 12px;outline:none}input:focus{border-color:var(--blue);box-shadow:0 0 0 3px #54a8ff22}.token-row{display:grid;grid-template-columns:1fr auto;gap:8px}.status-list{display:grid;gap:11px}.status-row{display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid #263a5577}.status-row:last-child{border:0}.status-row span:last-child{text-align:right}.good{color:var(--green)}.bad-text{color:var(--red)}
+    .wait{margin-top:18px}.wait-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.events{grid-column:1/-1}.event-list{max-height:230px;overflow:auto;display:grid;gap:7px}.event{background:#0a1727;border-left:3px solid var(--blue);border-radius:8px;padding:9px 11px;color:#cbd9e9;font-size:13px}.event.error{border-color:var(--red)}.event time{color:var(--muted);margin-right:8px}.empty{color:var(--muted);padding:20px 0;text-align:center}.footer{text-align:center;color:#66809f;font-size:12px;margin-top:22px}
+    @media(max-width:760px){.grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.meta,.wait-grid{grid-template-columns:1fr}.shell{width:min(100% - 20px,1080px);padding-top:18px}}
+  </style>
+</head>
+<body>
+<main class="shell">
+  <header class="top">
+    <div class="brand"><div class="logo">↯</div><div><h1>SMS USB Receiver</h1><p>Android Open Accessory · 仅本机访问</p></div></div>
+    <div id="service-pill" class="pill"><span class="dot"></span><span id="service-text">正在连接服务…</span></div>
+  </header>
+  <section class="grid">
+    <article class="card code-card">
+      <div class="label">最新验证码</div>
+      <div id="code" class="code">••••••</div>
+      <div id="code-hint" class="hint">等待手机通过 USB 转发验证码</div>
+      <div class="actions">
+        <button id="refresh-code">读取最新</button>
+        <button id="reveal-code" class="secondary" disabled>显示验证码</button>
+        <button id="copy-code" class="secondary" disabled>复制</button>
+        <button id="consume-code" class="danger">读取并消费</button>
+      </div>
+      <div class="meta">
+        <div><span class="label">发送方</span><strong id="sender">—</strong></div>
+        <div><span class="label">接收时间</span><strong id="received-at">—</strong></div>
+        <div><span class="label">过期时间</span><strong id="expires-at">—</strong></div>
+        <div><span class="label">状态</span><strong id="code-state">等待数据</strong></div>
+      </div>
+    </article>
+    <aside class="card">
+      <h2>连接状态</h2>
+      <div class="status-list">
+        <div class="status-row"><span>API 服务</span><span id="api-state">检查中</span></div>
+        <div class="status-row"><span>USB Accessory</span><span id="usb-state">检查中</span></div>
+        <div class="status-row"><span>最后消息</span><span id="last-message">—</span></div>
+      </div>
+      <div class="wait">
+        <h2>等待新验证码</h2>
+        <div class="wait-grid">
+          <div class="field"><label for="sender-filter">发送方包含</label><input id="sender-filter" placeholder="例如 1069"></div>
+          <div class="field"><label for="timeout">超时秒数</label><input id="timeout" type="number" min="1" max="300" value="120"></div>
+        </div>
+        <button id="wait-code">开始等待</button>
+        <button id="cancel-wait" class="secondary" disabled>取消等待</button>
+      </div>
+    </aside>
+    <article class="card events">
+      <h2>本页事件</h2>
+      <div id="events" class="event-list"><div class="empty">暂无事件</div></div>
+    </article>
+  </section>
+  <div class="footer">验证码默认脱敏 · 本地页面自动建立安全会话 · 页面响应禁止缓存</div>
+</main>
+<script>
+  'use strict';
+  const $=id=>document.getElementById(id), state={code:null,revealed:false,controller:null};
+  const time=v=>v?new Date(v).toLocaleString():'—';
+  function event(message,error=false){const box=$('events');if(box.querySelector('.empty'))box.textContent='';const row=document.createElement('div');row.className='event'+(error?' error':'');const stamp=document.createElement('time');stamp.textContent=new Date().toLocaleTimeString();row.append(stamp,document.createTextNode(message));box.prepend(row);while(box.children.length>50)box.lastChild.remove()}
+  function renderCode(){const value=state.code?.code;if(!value){$('code').textContent='••••••';$('reveal-code').disabled=true;$('copy-code').disabled=true;return}$('code').textContent=state.revealed?value:'•'.repeat(Math.max(0,value.length-2))+value.slice(-2);$('reveal-code').disabled=false;$('copy-code').disabled=false;$('reveal-code').textContent=state.revealed?'隐藏验证码':'显示验证码'}
+  function setCode(data,status='有效'){state.code=data;state.revealed=false;renderCode();$('sender').textContent=data.sender;$('received-at').textContent=time(data.receivedAt);$('expires-at').textContent=time(data.expiresAt);$('code-state').textContent=status;$('code-hint').textContent='默认仅显示末两位'}
+  async function jsonFetch(url,options={}){const response=await fetch(url,{cache:'no-store',...options});let body={};try{body=await response.json()}catch{}if(!response.ok){const error=new Error(body.detail||`HTTP ${response.status}`);error.status=response.status;throw error}return body}
+  async function health(){try{const data=await jsonFetch('/health');$('api-state').textContent='运行中';$('api-state').className='good';$('usb-state').textContent=data.usbConnected?'已连接':'未连接';$('usb-state').className=data.usbConnected?'good':'bad-text';$('last-message').textContent=time(data.lastMessageAt);$('service-pill').className='pill '+(data.usbConnected?'ok':'bad');$('service-text').textContent=data.usbConnected?'USB 已连接':'API 正常，等待 USB'}catch{$('api-state').textContent='不可用';$('api-state').className='bad-text';$('service-pill').className='pill bad';$('service-text').textContent='服务连接失败'}}
+  async function loadCode(consume=false){try{const data=await jsonFetch(`/api/latest-code?consume=${consume}`);setCode(data,consume?'已消费':'有效');event(consume?'验证码已读取并从内存删除':'已读取最新验证码')}catch(e){if(e.status===404){state.code=null;renderCode();$('code-state').textContent='暂无有效验证码'}event(e.message,true)}}
+  $('refresh-code').onclick=()=>loadCode(false);$('consume-code').onclick=()=>loadCode(true);
+  $('reveal-code').onclick=()=>{state.revealed=!state.revealed;renderCode()};
+  $('copy-code').onclick=async()=>{if(state.code){await navigator.clipboard.writeText(state.code.code);event('验证码已复制到剪贴板')}};
+  $('wait-code').onclick=async()=>{state.controller=new AbortController();$('wait-code').disabled=true;$('cancel-wait').disabled=false;$('code-state').textContent='等待中';const timeout=Math.min(300,Math.max(1,Number($('timeout').value)||120));const body={timeoutSeconds:timeout,senderContains:$('sender-filter').value||null,after:new Date().toISOString()};event(`开始等待新验证码，最长 ${timeout} 秒`);try{const data=await jsonFetch('/api/wait-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:state.controller.signal});setCode(data,'已接收并消费');event('收到新的匹配验证码')}catch(e){if(e.name==='AbortError')event('等待已取消');else event(e.message,true)}finally{state.controller=null;$('wait-code').disabled=false;$('cancel-wait').disabled=true}};
+  $('cancel-wait').onclick=()=>state.controller?.abort();
+  health();setInterval(health,2500);loadCode(false);
+</script>
+</body>
+</html>
