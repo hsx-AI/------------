@@ -6,3 +6,4 @@ libusb-package==1.0.26.3
 pytest==8.4.1
 httpx==0.28.1
 playwright==1.54.0
+pycryptodome==3.23.0
