@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import math
 import os
 import subprocess
 import sys
@@ -21,10 +22,9 @@ RECEIVER_PYTHON = RECEIVER_DIR / ".venv" / "Scripts" / "python.exe"
 RECEIVER_CONFIG = Path(os.environ.get("LOCALAPPDATA", "")) / "SmsUsbForwarder" / "config.json"
 API_URL = "http://127.0.0.1:8765"
 
-# Coordinates measured from the currently installed frameless aTrust window.
-# DPI awareness above makes these true physical client coordinates.  The
-# bottom diagnostics toolbar accounts for the height difference from the
-# earlier reference screenshot.
+# Coordinates measured from a 921x570 frameless aTrust client.  At runtime
+# they are scaled by the current client width, which follows the window's DPI
+# while remaining unaffected by the optional bottom diagnostics toolbar.
 REFERENCE_SIZE = (921, 570)
 PHONE_POINT = (744, 197)
 REQUEST_POINT = (840, 257)
@@ -34,13 +34,74 @@ CODE_POINT = (700, 312)
 LOGIN_POINT = (706, 411)
 AE_PLATFORM_POINT = (280, 174)
 
+CONTROL_LABELS = {
+    "phone": "手机号输入框",
+    "request": "获取验证码按钮",
+    "code": "验证码输入框",
+    "login": "登录按钮",
+    "ae_platform": "AE 平台入口",
+}
+CONTROL_KEYWORDS = {
+    "phone": ("手机号", "手机号码", "phone", "mobile"),
+    "request": ("立即获取", "获取验证码", "发送验证码", "send code", "get code"),
+    "code": ("验证码", "校验码", "动态码", "verification code", "otp"),
+    "login": ("登录", "登陆", "log in", "login"),
+    "ae_platform": ("ae 协调平台", "ae平台", "协调平台"),
+}
+CONTROL_TYPES = {
+    "phone": ("edit",),
+    "request": ("button", "hyperlink"),
+    "code": ("edit",),
+    "login": ("button",),
+    "ae_platform": ("button", "listitem", "hyperlink"),
+}
+# Buttons in this client use Sangfor blue.  Searching for that color around
+# the scaled reference point corrects small layout shifts without needing a
+# reference screenshot or OCR package.
+VISUAL_BLUE_SEARCH = {
+    "request": (130, 55),
+    "login": (170, 80),
+}
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 user32.GetDC.argtypes = [wintypes.HWND]
 user32.GetDC.restype = wintypes.HDC
 user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+user32.PrintWindow.restype = wintypes.BOOL
 gdi32.GetPixel.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
 gdi32.GetPixel.restype = wintypes.DWORD
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+gdi32.SelectObject.restype = wintypes.HGDIOBJ
+gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+gdi32.GetDIBits.argtypes = [
+    wintypes.HDC,
+    wintypes.HBITMAP,
+    wintypes.UINT,
+    wintypes.UINT,
+    wintypes.LPVOID,
+    wintypes.LPVOID,
+    wintypes.UINT,
+]
+gdi32.GetDIBits.restype = ctypes.c_int
+gdi32.BitBlt.argtypes = [
+    wintypes.HDC,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.HDC,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.DWORD,
+]
+gdi32.BitBlt.restype = wintypes.BOOL
 
 # Mouse coordinates are physical pixels.  Without per-monitor DPI awareness,
 # Windows virtualizes GetClientRect/ClientToScreen but not all input paths in
@@ -180,7 +241,19 @@ def find_window() -> int | None:
 def open_client(timeout: int = 20) -> int:
     if not CLIENT_EXE.exists():
         raise RuntimeError(f"找不到 aTrust 客户端: {CLIENT_EXE}")
-    subprocess.Popen([str(CLIENT_EXE)])
+    # aTrust's native SSL/proxy/defender processes write verbose diagnostics to
+    # every inherited console handle.  Detaching the GUI process and redirecting
+    # all three standard streams keeps those vendor logs out of this program's
+    # console while preserving our own progress messages and exceptions.
+    creation_flags = subprocess.DETACHED_PROCESS if sys.platform == "win32" else 0
+    subprocess.Popen(
+        [str(CLIENT_EXE)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creation_flags,
+        close_fds=True,
+    )
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         hwnd = find_window()
@@ -193,34 +266,316 @@ def open_client(timeout: int = 20) -> int:
     raise RuntimeError("未找到 aTrust 登录窗口")
 
 
-def client_point(hwnd: int, point: tuple[int, int]) -> tuple[int, int]:
+def client_size(hwnd: int) -> tuple[int, int]:
     rect = wintypes.RECT()
     if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
         raise ctypes.WinError(ctypes.get_last_error())
     width, height = rect.right, rect.bottom
     if width < 700 or height < 400:
         raise RuntimeError(f"aTrust 窗口尺寸异常: {width}x{height}")
-    # aTrust adds/removes its bottom diagnostics toolbar dynamically.  That
-    # changes the reported window height, while the login form itself remains
-    # at fixed client coordinates.  Scaling by the whole client size therefore
-    # moves the code/login clicks upward into the preceding controls.
-    if point[0] >= width or point[1] >= height:
+    return width, height
+
+
+def scaled_reference_point(width: int, point: tuple[int, int]) -> tuple[int, int]:
+    """Scale a reference client point using width, which tracks aTrust DPI."""
+    scale = width / REFERENCE_SIZE[0]
+    return round(point[0] * scale), round(point[1] * scale)
+
+
+def client_to_screen(hwnd: int, point: tuple[int, int]) -> tuple[int, int]:
+    width, height = client_size(hwnd)
+    if not 0 <= point[0] < width or not 0 <= point[1] < height:
         raise RuntimeError(f"目标控件坐标 {point} 超出 aTrust 客户区 {width}x{height}")
-    pt = wintypes.POINT(point[0], point[1])
+    pt = wintypes.POINT(*point)
     user32.ClientToScreen(hwnd, ctypes.byref(pt))
     return pt.x, pt.y
 
 
-def click(hwnd: int, point: tuple[int, int]) -> None:
+def client_point(hwnd: int, point: tuple[int, int]) -> tuple[int, int]:
+    """Convert a reference-size client point to a physical screen point."""
+    width, _height = client_size(hwnd)
+    return client_to_screen(hwnd, scaled_reference_point(width, point))
+
+
+def client_screen_rect(hwnd: int) -> tuple[int, int, int, int]:
+    width, height = client_size(hwnd)
+    left, top = client_to_screen(hwnd, (0, 0))
+    return left, top, left + width, top + height
+
+
+def enumerate_uia_controls(hwnd: int) -> list[dict]:
+    """Read UI Automation descendants without requiring third-party modules."""
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]__HWND__)
+if ($null -eq $root) { exit 0 }
+$items = @($root.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants,
+    [System.Windows.Automation.Condition]::TrueCondition
+))
+$result = foreach ($item in $items) {
+    try {
+        $current = $item.Current
+        [PSCustomObject]@{
+            type = $current.ControlType.ProgrammaticName
+            name = $current.Name
+            automationId = $current.AutomationId
+            className = $current.ClassName
+            x = $current.BoundingRectangle.X
+            y = $current.BoundingRectangle.Y
+            width = $current.BoundingRectangle.Width
+            height = $current.BoundingRectangle.Height
+            focusable = $current.IsKeyboardFocusable
+            enabled = $current.IsEnabled
+        }
+    } catch {}
+}
+if ($null -ne $result) { @($result) | ConvertTo-Json -Compress -Depth 3 }
+""".replace("__HWND__", str(hwnd))
+    creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=6,
+            creationflags=creation_flags,
+            check=False,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            return []
+        result = json.loads(completed.stdout)
+        return result if isinstance(result, list) else [result]
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return []
+
+
+def choose_uia_control(
+    controls: list[dict],
+    role: str,
+    expected_screen: tuple[int, int],
+    bounds: tuple[int, int, int, int],
+) -> tuple[int, int] | None:
+    """Choose an accessible control by semantics, type, and expected position."""
+    left, top, right, bottom = bounds
+    keywords = CONTROL_KEYWORDS.get(role, ())
+    preferred_types = CONTROL_TYPES.get(role, ())
+    best: tuple[float, tuple[int, int]] | None = None
+    for control in controls:
+        try:
+            x = float(control.get("x", 0))
+            y = float(control.get("y", 0))
+            width = float(control.get("width", 0))
+            height = float(control.get("height", 0))
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) for value in (x, y, width, height)):
+            continue
+        if width < 8 or height < 8 or not control.get("enabled", True):
+            continue
+        center = round(x + width / 2), round(y + height / 2)
+        if not left <= center[0] < right or not top <= center[1] < bottom:
+            continue
+
+        control_type = str(control.get("type", "")).rsplit(".", 1)[-1].lower()
+        searchable = " ".join(
+            str(control.get(key, "")) for key in ("name", "automationId", "className")
+        ).lower()
+        keyword_match = any(keyword in searchable for keyword in keywords)
+        type_match = any(preferred in control_type for preferred in preferred_types)
+        if not keyword_match and not type_match:
+            continue
+        distance = math.dist(center, expected_screen)
+        score = (120 if keyword_match else 0) + (35 if type_match else 0) - distance / 20
+        if control.get("focusable"):
+            score += 5
+        if best is None or score > best[0]:
+            best = score, center
+    return best[1] if best else None
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+def capture_client_bgra(hwnd: int) -> tuple[int, int, bytes] | None:
+    """Capture the aTrust client even when another window partly covers it."""
+    width, height = client_size(hwnd)
+    window_dc = user32.GetDC(hwnd)
+    if not window_dc:
+        return None
+    memory_dc = gdi32.CreateCompatibleDC(window_dc)
+    bitmap = gdi32.CreateCompatibleBitmap(window_dc, width, height) if memory_dc else None
+    old_object = gdi32.SelectObject(memory_dc, bitmap) if bitmap else None
+    try:
+        if not memory_dc or not bitmap:
+            return None
+        rendered = user32.PrintWindow(hwnd, memory_dc, 0x00000003)  # client + full content
+        if not rendered:
+            rendered = gdi32.BitBlt(memory_dc, 0, 0, width, height, window_dc, 0, 0, 0x00CC0020)
+        if not rendered:
+            return None
+        header = BITMAPINFOHEADER(
+            ctypes.sizeof(BITMAPINFOHEADER), width, -height, 1, 32, 0, 0, 0, 0, 0, 0
+        )
+        pixels = ctypes.create_string_buffer(width * height * 4)
+        if not gdi32.GetDIBits(
+            memory_dc, bitmap, 0, height, pixels, ctypes.byref(header), 0
+        ):
+            return None
+        return width, height, pixels.raw
+    finally:
+        if old_object:
+            gdi32.SelectObject(memory_dc, old_object)
+        if bitmap:
+            gdi32.DeleteObject(bitmap)
+        if memory_dc:
+            gdi32.DeleteDC(memory_dc)
+        user32.ReleaseDC(hwnd, window_dc)
+
+
+def visually_refine_blue_control(
+    hwnd: int, role: str, expected_client: tuple[int, int]
+) -> tuple[int, int] | None:
+    search = VISUAL_BLUE_SEARCH.get(role)
+    if not search:
+        return None
+    captured = capture_client_bgra(hwnd)
+    if not captured:
+        return None
+    width, height, pixels = captured
+    scale = width / REFERENCE_SIZE[0]
+    radius_x, radius_y = round(search[0] * scale), round(search[1] * scale)
+    x0 = max(0, expected_client[0] - radius_x)
+    x1 = min(width, expected_client[0] + radius_x + 1)
+    y0 = max(0, expected_client[1] - radius_y)
+    y1 = min(height, expected_client[1] + radius_y + 1)
+    sum_x = sum_y = count = 0
+    # Sampling every other pixel is enough for both filled buttons and blue text.
+    for y in range(y0, y1, 2):
+        row = y * width * 4
+        for x in range(x0, x1, 2):
+            index = row + x * 4
+            blue, green, red = pixels[index], pixels[index + 1], pixels[index + 2]
+            if blue >= 155 and blue >= red + 55 and blue >= green + 30:
+                sum_x += x
+                sum_y += y
+                count += 1
+    blue_center = (round(sum_x / count), round(sum_y / count)) if count >= 8 else None
+    if role == "request":
+        # The blue glyphs can sit slightly above the clickable row center at
+        # some font/DPI combinations.  Use the code input's long gray top and
+        # bottom borders to derive the exact vertical center, while retaining
+        # the blue “立即获取” text for the horizontal coordinate.
+        row_center = detect_input_row_center(
+            width, height, pixels, expected_client, scale
+        )
+        if row_center is not None:
+            return (blue_center[0] if blue_center else expected_client[0]), row_center
+    return blue_center
+
+
+def detect_input_row_center(
+    width: int,
+    height: int,
+    pixels: bytes,
+    expected_client: tuple[int, int],
+    scale: float,
+) -> int | None:
+    """Find the code input rectangle and return its geometric vertical center."""
+    expected_x, expected_y = expected_client
+    x0 = max(0, expected_x - round(360 * scale))
+    x1 = min(width, expected_x + round(35 * scale) + 1)
+    y0 = max(0, expected_y - round(50 * scale))
+    y1 = min(height, expected_y + round(50 * scale) + 1)
+    minimum_border_pixels = max(20, (x1 - x0) // 8)
+    border_rows: list[tuple[int, int]] = []
+    for y in range(y0, y1):
+        gray_pixels = 0
+        row = y * width * 4
+        for x in range(x0, x1, 2):
+            index = row + x * 4
+            blue, green, red = pixels[index], pixels[index + 1], pixels[index + 2]
+            if max(red, green, blue) - min(red, green, blue) <= 5 and 205 <= red <= 240:
+                gray_pixels += 1
+        if gray_pixels >= minimum_border_pixels:
+            border_rows.append((y, gray_pixels))
+
+    minimum_height = round(28 * scale)
+    maximum_height = round(50 * scale)
+    best: tuple[float, int] | None = None
+    for top, top_score in border_rows:
+        if top > expected_y:
+            continue
+        for bottom, bottom_score in border_rows:
+            border_height = bottom - top
+            if bottom < expected_y or not minimum_height <= border_height <= maximum_height:
+                continue
+            center = round((top + bottom) / 2)
+            # Prefer a pair centered on the predicted row and close to the
+            # reference input height (40 px before DPI scaling).
+            score = (
+                top_score
+                + bottom_score
+                - abs(center - expected_y) * 10
+                - abs(border_height - 40 * scale) * 2
+            )
+            if best is None or score > best[0]:
+                best = score, center
+    return best[1] if best else None
+
+
+def locate_control(hwnd: int, role: str, reference: tuple[int, int]) -> tuple[int, int]:
+    width, _height = client_size(hwnd)
+    expected_client = scaled_reference_point(width, reference)
+    expected_screen = client_to_screen(hwnd, expected_client)
+    accessible = choose_uia_control(
+        enumerate_uia_controls(hwnd), role, expected_screen, client_screen_rect(hwnd)
+    )
+    label = CONTROL_LABELS.get(role, role)
+    if accessible:
+        log(f"定位 {label}：UI Automation")
+        return accessible
+    visual = visually_refine_blue_control(hwnd, role, expected_client)
+    if visual:
+        log(f"定位 {label}：窗口图像识别")
+        return client_to_screen(hwnd, visual)
+    log(f"定位 {label}：窗口比例自适应")
+    return expected_screen
+
+
+def click_screen(hwnd: int, point: tuple[int, int]) -> None:
     user32.SetForegroundWindow(hwnd)
     time.sleep(0.35)
-    x, y = client_point(hwnd, point)
+    x, y = point
     user32.SetCursorPos(x, y)
     time.sleep(0.25)
     user32.mouse_event(0x0002, 0, 0, 0, 0)
     time.sleep(0.12)
     user32.mouse_event(0x0004, 0, 0, 0, 0)
     time.sleep(0.55)
+
+
+def click(hwnd: int, point: tuple[int, int], role: str | None = None) -> None:
+    target = locate_control(hwnd, role, point) if role else client_point(hwnd, point)
+    click_screen(hwnd, target)
 
 
 def pixel_color(hwnd: int, point: tuple[int, int]) -> tuple[int, int, int]:
@@ -275,7 +630,7 @@ def open_ae_platform() -> None:
     user32.SetForegroundWindow(hwnd)
     time.sleep(1)
     log("Clicking AE platform tile")
-    click(hwnd, AE_PLATFORM_POINT)
+    click(hwnd, AE_PLATFORM_POINT, "ae_platform")
     time.sleep(3)
 
 
@@ -285,15 +640,16 @@ def keyboard(vk: int, up: bool = False) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def replace_text(hwnd: int, point: tuple[int, int], text: str) -> None:
-    click(hwnd, point)
+def replace_text(hwnd: int, point: tuple[int, int], text: str, role: str) -> None:
+    target = locate_control(hwnd, role, point)
+    click_screen(hwnd, target)
     # The embedded browser sometimes accepts the mouse click visually before
     # its input element has keyboard focus.  Waiting here prevents the first
     # digit from being swallowed.
     time.sleep(0.8)
     # A second click is intentional: the first can merely activate the
     # Chromium-based child surface after the receiver wait returns.
-    click(hwnd, point)
+    click_screen(hwnd, target)
     time.sleep(0.45)
     keyboard(VK_CONTROL)
     keyboard(VK_A)
@@ -331,18 +687,18 @@ def run(phone: str, timeout: int, sender: str | None) -> None:
     token = ensure_receiver()
     log("打开 aTrust 登录窗口")
     hwnd = open_client()
-    replace_text(hwnd, PHONE_POINT, phone)
+    replace_text(hwnd, PHONE_POINT, phone, "phone")
     requested_after = datetime.now(timezone.utc)
     log("请求短信验证码")
-    click(hwnd, REQUEST_POINT)
+    click(hwnd, REQUEST_POINT, "request")
     log(f"等待手机转发新验证码（最长 {timeout} 秒）")
     code = wait_for_code(token, requested_after, timeout, sender)
     log("已收到验证码，正在填写并登录")
     hwnd = find_window()
     if not hwnd:
         raise RuntimeError("等待验证码期间 aTrust 登录窗口已关闭")
-    replace_text(hwnd, CODE_POINT, code)
-    click(hwnd, LOGIN_POINT)
+    replace_text(hwnd, CODE_POINT, code, "code")
+    click(hwnd, LOGIN_POINT, "login")
     log("aTrust login submitted")
     time.sleep(3)
 
