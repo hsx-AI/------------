@@ -44,7 +44,7 @@ API Token 自动从 `%LOCALAPPDATA%\SmsUsbForwarder\config.json` 读取，不写
 
 - `username`：AE 平台账号；
 - `password`：AE 平台密码；
-- `verificationPasswordEncoding`：验证码接口对密码的预处理方式；含特殊字符时使用 `url`；
+- `verificationPasswordEncoding`：验证码接口密码模式，当前已验证应使用 `raw`；
 - `smsSenderContains`：可留空；如需避免混淆短信，可填写发送号码的一部分；
 
 在 `atrust_config.json` 中填写 aTrust 登录手机号，然后运行统一主程序：

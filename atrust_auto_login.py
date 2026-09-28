@@ -21,6 +21,7 @@ RECEIVER_DIR = ROOT / "pc_receiver"
 RECEIVER_PYTHON = RECEIVER_DIR / ".venv" / "Scripts" / "python.exe"
 RECEIVER_CONFIG = Path(os.environ.get("LOCALAPPDATA", "")) / "SmsUsbForwarder" / "config.json"
 API_URL = "http://127.0.0.1:8765"
+_started_receiver_process: subprocess.Popen | None = None
 
 # Coordinates measured from a 921x570 frameless aTrust client.  At runtime
 # they are scaled by the current client width, which follows the window's DPI
@@ -177,6 +178,7 @@ def api_request(path: str, token: str | None = None, body: dict | None = None, t
 
 
 def ensure_receiver() -> str:
+    global _started_receiver_process
     try:
         api_request("/health", timeout=2)
     except (OSError, urllib.error.URLError):
@@ -191,6 +193,7 @@ def ensure_receiver() -> str:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        _started_receiver_process = receiver_process
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if receiver_process.poll() is not None:
@@ -215,6 +218,22 @@ def ensure_receiver() -> str:
     if not health.get("usbConnected"):
         log("警告：手机 USB 尚未显示为已连接；仍将等待验证码，请确认手机已解锁并授权配件连接")
     return token
+
+
+def stop_started_receiver() -> None:
+    """Stop only the receiver process launched by this program."""
+    global _started_receiver_process
+    process = _started_receiver_process
+    _started_receiver_process = None
+    if process is None or process.poll() is not None:
+        return
+    log("正在停止 USB 短信接收服务并释放设备")
+    process.terminate()
+    try:
+        process.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
 
 
 def find_window() -> int | None:
@@ -668,17 +687,29 @@ def replace_text(hwnd: int, point: tuple[int, int], text: str, role: str) -> Non
 
 
 def wait_for_code(token: str, after: datetime, timeout: int, sender: str | None) -> str:
-    body = {"timeoutSeconds": timeout, "after": after.isoformat(), "senderContains": sender or None}
-    try:
-        result = api_request("/api/wait-code", token=token, body=body, timeout=timeout + 10)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 408:
-            raise TimeoutError(f"{timeout} 秒内未收到新验证码") from exc
-        raise RuntimeError(f"短信接收接口返回 HTTP {exc.code}") from exc
-    code = str(result.get("code", ""))
-    if not code:
-        raise RuntimeError("短信接收接口没有返回验证码")
-    return code
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"{timeout} 秒内未收到新验证码")
+        wait_seconds = max(1, min(2, math.ceil(remaining)))
+        body = {
+            "timeoutSeconds": wait_seconds,
+            "after": after.isoformat(),
+            "senderContains": sender or None,
+        }
+        try:
+            result = api_request(
+                "/api/wait-code", token=token, body=body, timeout=wait_seconds + 2
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code == 408:
+                continue
+            raise RuntimeError(f"短信接收接口返回 HTTP {exc.code}") from exc
+        code = str(result.get("code", ""))
+        if not code:
+            raise RuntimeError("短信接收接口没有返回验证码")
+        return code
 
 
 def run(phone: str, timeout: int, sender: str | None) -> None:

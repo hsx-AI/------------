@@ -77,26 +77,31 @@ def main() -> int:
     # 在发送第一条短信前检查第二阶段配置，避免流程进行一半才发现缺少凭据。
     validate_ecs_config()
 
-    print("\n=== 第一阶段：登录 aTrust ===", flush=True)
-    atrust_auto_login.run(phone, timeout, sender)
+    try:
+        print("\n=== 第一阶段：登录 aTrust ===", flush=True)
+        atrust_auto_login.run(phone, timeout, sender)
 
-    if not RECEIVER_PYTHON.exists():
-        raise RuntimeError(f"找不到接收器虚拟环境 Python：{RECEIVER_PYTHON}")
+        if not RECEIVER_PYTHON.exists():
+            raise RuntimeError(f"找不到接收器虚拟环境 Python：{RECEIVER_PYTHON}")
 
-    print("\n=== 第二阶段：登录 AE 协调平台 ===", flush=True)
-    completed = subprocess.run(
-        [str(RECEIVER_PYTHON), str(ECS_SCRIPT)], cwd=ROOT, check=False
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"AE 平台登录阶段失败，退出码 {completed.returncode}")
+        print("\n=== 第二阶段：登录 AE 协调平台 ===", flush=True)
+        completed = subprocess.run(
+            [str(RECEIVER_PYTHON), str(ECS_SCRIPT)], cwd=ROOT, check=False
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"AE 平台登录阶段失败，退出码 {completed.returncode}")
 
-    print("\n全部登录流程已完成。", flush=True)
-    return 0
+        print("\n全部登录流程已完成。", flush=True)
+        return 0
+    finally:
+        atrust_auto_login.stop_started_receiver()
 
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        exit_code = main()
+        input("\n流程已完成。按 Enter 键退出……")
+        raise SystemExit(exit_code)
     except KeyboardInterrupt:
         print("\n已取消", file=sys.stderr)
         raise SystemExit(130)
