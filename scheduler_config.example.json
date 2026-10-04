@@ -1,0 +1,7 @@
+{
+  "intervalMinutes": 60,
+  "runImmediately": true,
+  "dbPath": "data/ecs_documents.db",
+  "keepDownloadedExcel": true,
+  "preferSavedSession": true
+}

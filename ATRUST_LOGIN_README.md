@@ -53,6 +53,40 @@ API Token 自动从 `%LOCALAPPDATA%\SmsUsbForwarder\config.json` 读取，不写
 python .\main.py
 ```
 
-`main.py` 会自动申请管理员权限，并依次完成 aTrust 登录、等待隧道可用、通过纯 HTTP 请求获取 AE 平台验证码、提交 CAS 加密登录并保存 ECS 会话 Cookie。第二阶段不需要打开或控制浏览器。
+`main.py` 会自动申请管理员权限，并依次完成 aTrust 登录、等待隧道可用、通过纯 HTTP 请求获取 AE 平台验证码、提交 CAS 加密登录并保存 ECS 会话 Cookie，最后把导出的 Excel 按「文件编号」主键 upsert 进 SQLite。第二阶段不需要打开或控制浏览器。
+
+## 定时同步入库
+
+复制 `scheduler_config.example.json` 为 `scheduler_config.json`（若本地已有可直接改），主要字段：
+
+- `intervalMinutes`：同步周期（分钟），可随时修改，下一轮等待会重新读取；
+- `runImmediately`：启动后是否立刻跑第一轮；
+- `dbPath`：SQLite 路径，默认 `data/ecs_documents.db`；
+- `keepDownloadedExcel`：是否保留 `downloads/` 下的原始 Excel；
+- `preferSavedSession`：优先复用 `ecs_session_cookies.txt`，失败才重新短信登录。
+
+启动常驻任务：
+
+```powershell
+python .\scheduler.py
+# 或
+.\start_scheduler.bat
+```
+
+只跑一轮：
+
+```powershell
+python .\scheduler.py --once
+```
+
+数据库表 `documents` 以 `文件编号` 为主键：新编号插入，已有编号按最新 Excel 行更新；内容未变时只刷新 `fetched_at`。
+
+若某行有字段变化，会写入 `document_changes` 明细：记录该 `文件编号`、变更字段名、旧值、新值、变更时间与同步批次号。可用例如：
+
+```sql
+SELECT * FROM document_changes
+WHERE sync_batch_id = '刚才日志里的批次号'
+ORDER BY "文件编号", id;
+```
 
 `ecs_login_config.json` 已加入 `.gitignore`，不会被 Git 跟踪。它仍是本地明文配置，请限制该文件的 Windows 访问权限，不要发送给他人。

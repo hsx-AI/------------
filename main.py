@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent
 ATRUST_CONFIG = ROOT / "atrust_config.json"
 ECS_CONFIG = ROOT / "ecs_login_config.json"
 RECEIVER_PYTHON = ROOT / "pc_receiver" / ".venv" / "Scripts" / "python.exe"
-ECS_SCRIPT = ROOT / "ecs_auto_login.py"
+ECS_SYNC_SCRIPT = ROOT / "ecs_sync.py"
 
 
 def is_admin() -> bool:
@@ -84,14 +84,20 @@ def main() -> int:
         if not RECEIVER_PYTHON.exists():
             raise RuntimeError(f"找不到接收器虚拟环境 Python：{RECEIVER_PYTHON}")
 
-        print("\n=== 第二阶段：登录 AE 协调平台 ===", flush=True)
-        completed = subprocess.run(
-            [str(RECEIVER_PYTHON), str(ECS_SCRIPT)], cwd=ROOT, check=False
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(f"AE 平台登录阶段失败，退出码 {completed.returncode}")
+        print("\n=== 第二阶段：登录 AE 协调平台并入库 ===", flush=True)
+        from scheduler_settings import load_scheduler_config, resolve_db_path
 
-        print("\n全部登录流程已完成。", flush=True)
+        sync_config = load_scheduler_config()
+        db_path = resolve_db_path(sync_config)
+        keep_excel = bool(sync_config.get("keepDownloadedExcel", True))
+        command = [str(RECEIVER_PYTHON), str(ECS_SYNC_SCRIPT), "--db", str(db_path)]
+        if not keep_excel:
+            command.append("--delete-excel")
+        completed = subprocess.run(command, cwd=ROOT, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(f"AE 平台登录/入库阶段失败，退出码 {completed.returncode}")
+
+        print("\n全部登录与入库流程已完成。", flush=True)
         return 0
     finally:
         atrust_auto_login.stop_started_receiver()

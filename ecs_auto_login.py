@@ -168,14 +168,30 @@ def wait_for_code(token: str, after: datetime, timeout: int, sender: str | None)
         return code
 
 
-def build_opener(direct: bool = False) -> tuple[urllib.request.OpenerDirector, http.cookiejar.MozillaCookieJar]:
+def build_opener(
+    direct: bool = False,
+    load_existing: bool = False,
+) -> tuple[urllib.request.OpenerDirector, http.cookiejar.MozillaCookieJar]:
     cookies = http.cookiejar.MozillaCookieJar(str(SESSION_FILE))
+    if load_existing and SESSION_FILE.exists():
+        try:
+            cookies.load(ignore_discard=True, ignore_expires=True)
+        except Exception as exc:
+            raise RuntimeError(f"读取会话 Cookie 失败: {exc}") from exc
     handlers: list[object] = [urllib.request.HTTPCookieProcessor(cookies)]
     if direct:
         handlers.insert(0, urllib.request.ProxyHandler({}))
     opener = urllib.request.build_opener(*handlers)
     opener.addheaders = [("User-Agent", USER_AGENT), ("Accept-Language", "zh-CN,zh;q=0.9")]
     return opener, cookies
+
+
+def iter_session_openers(load_existing: bool = False):
+    # This PC may route aTrust-only hosts through a local proxy or directly.
+    return [
+        build_opener(direct=False, load_existing=load_existing),
+        build_opener(direct=True, load_existing=load_existing),
+    ]
 
 
 def fetch_login_page(opener: urllib.request.OpenerDirector) -> dict[str, str]:
@@ -193,10 +209,7 @@ def fetch_login_page(opener: urllib.request.OpenerDirector) -> dict[str, str]:
 def open_login_session(
     timeout: int = 90,
 ) -> tuple[urllib.request.OpenerDirector, http.cookiejar.MozillaCookieJar, dict[str, str]]:
-    # This PC has a local browser proxy. Depending on its current routing
-    # rules, the aTrust-only hostname may work through that proxy or directly.
-    # Alternate both routes and retain the first complete Cookie session.
-    sessions = [build_opener(direct=False), build_opener(direct=True)]
+    sessions = iter_session_openers(load_existing=False)
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
     while time.monotonic() < deadline:
@@ -209,6 +222,18 @@ def open_login_session(
                 break
         time.sleep(1)
     raise TimeoutError(f"aTrust 登录后 {timeout} 秒内仍无法访问 CAS: {last_error}")
+
+
+def download_with_saved_session() -> Path:
+    if not SESSION_FILE.exists():
+        raise RuntimeError(f"找不到已保存会话: {SESSION_FILE}")
+    last_error: Exception | None = None
+    for opener, _cookies in iter_session_openers(load_existing=True):
+        try:
+            return download_excel(opener)
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"使用已保存会话下载 Excel 失败: {last_error}")
 
 
 def javascript_encode_uri_component(value: str) -> str:
@@ -353,7 +378,7 @@ def download_excel(opener: urllib.request.OpenerDirector) -> Path:
     return output
 
 
-def run() -> None:
+def run() -> Path:
     config = load_config()
     token = receiver_token()
     log("等待 aTrust 隧道可访问 CAS 登录页")
@@ -380,7 +405,7 @@ def run() -> None:
     cookie_header = "; ".join(f"{cookie.name}={cookie.value}" for cookie in cookies)
     log(f"当前登录 Cookie: {cookie_header or '<无 Cookie>'}")
     log(f"会话 Cookie 已保存到: {SESSION_FILE}")
-    download_excel(opener)
+    return download_excel(opener)
 
 
 if __name__ == "__main__":
